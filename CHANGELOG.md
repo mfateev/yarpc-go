@@ -4,6 +4,8 @@ Releases
 v1.10.0 (unreleased)
 -------------------
 
+-   Add support for reading ShardKey, RoutingKey, and RoutingDelegate for
+    inbound http and tchannel calls.
 
 v1.9.0 (2017-06-08)
 -------------------
