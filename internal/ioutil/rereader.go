@@ -23,10 +23,39 @@ package ioutil
 import (
 	"bytes"
 	"io"
+	"sync"
 
 	"go.uber.org/atomic"
 	"go.uber.org/yarpc/internal/bufferpool"
 )
+
+var _dummyBuf = make([]byte, 0)
+
+var _rereaderPool = sync.Pool{
+	New: func() interface{} {
+		return &Rereader{
+			bufReader:      bytes.NewReader(_dummyBuf),
+			useBuffer:      atomic.NewBool(false),
+			hasReadFromSrc: atomic.NewBool(false),
+		}
+	},
+}
+
+// get returns a new rereader from the rereader pool that has been partially
+// reset. The bufReader, src, and buf variables need to be explicitly set.
+func get() *Rereader {
+	rere := _rereaderPool.Get().(*Rereader)
+	rere.poolReset()
+	return rere
+}
+
+// put removes references to the src and buffer, and returns the rereader to the
+// pool.
+func put(rere *Rereader) {
+	rere.buf = nil
+	rere.src = nil
+	_rereaderPool.Put(rere)
+}
 
 // NewRereader returns a new re-reader and closer that wraps the given reader.
 // The re-reader consumes the given reader on demand, recording the entire
@@ -43,21 +72,24 @@ func NewRereader(src io.Reader) (*Rereader, func()) {
 	// If the src is a *bytes.Buffer, we don't need to copy the src into a buffer
 	// and can use the buffer directly.
 	if bb, ok := src.(*bytes.Buffer); ok {
-		return &Rereader{
-			buf:            bb,
-			bufReader:      bytes.NewReader(bb.Bytes()),
-			useBuffer:      atomic.NewBool(true),
-			hasReadFromSrc: atomic.NewBool(false),
-		}, func() {}
+		rere := get()
+		rere.buf = bb
+		rere.bufReader.Reset(bb.Bytes())
+		rere.useBuffer.Store(true)
+		rere.hasReadFromSrc.Store(false)
+		return rere, func() { put(rere) }
 	}
 
 	buf := bufferpool.Get()
-	return &Rereader{
-		src:            src,
-		buf:            buf,
-		useBuffer:      atomic.NewBool(false),
-		hasReadFromSrc: atomic.NewBool(false),
-	}, func() { bufferpool.Put(buf) }
+	rere := get()
+	rere.src = src
+	rere.buf = buf
+	rere.useBuffer.Store(false)
+	rere.hasReadFromSrc.Store(false)
+	return rere, func() {
+		put(rere)
+		bufferpool.Put(buf)
+	}
 }
 
 // Rereader has the ability to read the same io.Reader multiple times.
@@ -129,7 +161,16 @@ func (rr *Rereader) Reset() error {
 		return err
 	}
 
-	rr.bufReader = bytes.NewReader(rr.buf.Bytes())
+	if rr.bufReader == nil {
+		rr.bufReader = bytes.NewReader(rr.buf.Bytes())
+	} else {
+		rr.bufReader.Reset(rr.buf.Bytes())
+	}
 	rr.useBuffer.Store(true)
 	return nil
+}
+
+func (rr *Rereader) poolReset() {
+	rr.useBuffer.Store(false)
+	rr.hasReadFromSrc.Store(false)
 }
